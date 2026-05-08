@@ -66,9 +66,32 @@ func (m *Manager) Load(label string) (*Snapshot, error) {
 // Delete removes a snapshot by label.
 func (m *Manager) Delete(label string) error {
 	if err := os.Remove(m.pathFor(label)); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("snapshot: %q not found", label)
+		}
 		return fmt.Errorf("snapshot: delete: %w", err)
 	}
 	return nil
+}
+
+// List returns the labels of all snapshots stored in the manager's directory.
+func (m *Manager) List() ([]string, error) {
+	entries, err := os.ReadDir(m.dir)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: list: %w", err)
+	}
+	var labels []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		const suffix = ".snap.json"
+		if len(name) > len(suffix) && name[len(name)-len(suffix):] == suffix {
+			labels = append(labels, name[:len(name)-len(suffix)])
+		}
+	}
+	return labels, nil
 }
 
 func (m *Manager) pathFor(label string) string {
