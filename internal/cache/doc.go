@@ -8,6 +8,13 @@
 // lookups. Each entry is associated with a context key (e.g. "production") and
 // expires after a configurable duration.
 //
+// # Cache Invalidation
+//
+// Entries are evicted lazily on access once their TTL has elapsed. No background
+// goroutine is used, keeping the implementation simple and allocation-free at
+// rest. Callers that require proactive eviction can call [Cache.Flush] to clear
+// all entries immediately.
+//
 // # Usage
 //
 //	c := cache.New(30 * time.Second)
