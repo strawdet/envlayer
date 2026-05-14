@@ -1,146 +1,129 @@
-// Package cli provides the command-line interface for envlayer.
-// It wires together the core internal packages into a usable tool
-// that resolves, merges, validates, and exports environment variables
-// based on runtime context.
 package cli
 
 import (
+	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
 
-	"github.com/envlayer/envlayer/internal/exporter"
 	"github.com/envlayer/envlayer/internal/linter"
-	"github.com/envlayer/envlayer/internal/masker"
+	"github.com/envlayer/envlayer/internal/loader"
 	"github.com/envlayer/envlayer/internal/merger"
-	"github.com/envlayer/envlayer/internal/printer"
 	"github.com/envlayer/envlayer/internal/resolver"
-	"github.com/envlayer/envlayer/internal/transformer"
+	"github.com/envlayer/envlayer/internal/sorter"
 )
 
-// Config holds the parsed CLI configuration for a single invocation.
-type Config struct {
-	// BaseDir is the directory containing .env layer files.
-	BaseDir string
+// Run is the CLI entry point.
+func Run(args []string) int {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: envlayer <command> [options]")
+		return 1
+	}
 
-	// Context is the runtime context (e.g. "production", "staging").
-	Context string
-
-	// OutputFormat controls how the resolved env is written (dotenv, export, json).
-	OutputFormat string
-
-	// OutputFile is an optional path to write the output. Defaults to stdout.
-	OutputFile string
-
-	// MaskSensitive controls whether sensitive keys are masked in printed output.
-	MaskSensitive bool
-
-	// PrintTable renders the resolved env in a table instead of key=value.
-	PrintTable bool
-
-	// LintOnly runs linting checks without producing output.
-	LintOnly bool
-
-	// StripPrefix removes the given prefix from all resolved keys.
-	StripPrefix string
-
-	// KeyCase normalises key casing: "upper", "lower", or "" (no change).
-	KeyCase string
+	switch args[0] {
+	case "resolve":
+		return runResolve(args[1:])
+	case "lint":
+		return runLint(args[1:])
+	case "print":
+		return runPrint(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n", args[0])
+		return 1
+	}
 }
 
-// Run executes the envlayer resolution pipeline according to cfg.
-// It returns a non-nil error if any required step fails.
-func Run(cfg Config) error {
-	if cfg.BaseDir == "" {
-		cfg.BaseDir = "."
-	}
-	if cfg.OutputFormat == "" {
-		cfg.OutputFormat = "dotenv"
+func runResolve(args []string) int {
+	fs := flag.NewFlagSet("resolve", flag.ContinueOnError)
+	dir := fs.String("dir", ".", "base directory for .env files")
+	ctx := fs.String("context", "", "runtime context (e.g. production)")
+	format := fs.String("format", "kv", "output format: kv, export, json")
+	sortOrder := fs.String("sort", "asc", "sort order: asc, desc")
+
+	if err := fs.Parse(args); err != nil {
+		return 1
 	}
 
-	// Build merger and resolver.
-	m := merger.New(cfg.BaseDir)
+	m := merger.New(*dir)
 	r := resolver.New(m)
-
-	env, err := r.Resolve(cfg.Context)
+	env, err := r.Resolve(*ctx)
 	if err != nil {
-		return fmt.Errorf("resolve: %w", err)
+		fmt.Fprintf(os.Stderr, "resolve error: %v\n", err)
+		return 1
 	}
 
-	// Optional linting pass.
-	if cfg.LintOnly {
-		return runLint(cfg, m)
+	ord := sorter.Ascending
+	if *sortOrder == "desc" {
+		ord = sorter.Descending
 	}
-
-	// Apply transformer options when requested.
-	if cfg.StripPrefix != "" || cfg.KeyCase != "" {
-		var opts []transformer.Option
-		if cfg.StripPrefix != "" {
-			opts = append(opts, transformer.WithStripPrefix(cfg.StripPrefix))
-		}
-		if cfg.KeyCase != "" {
-			opts = append(opts, transformer.WithKeyCase(cfg.KeyCase))
-		}
-		t := transformer.New(opts...)
-		env, err = t.Apply(env)
-		if err != nil {
-			return fmt.Errorf("transform: %w", err)
-		}
-	}
-
-	// Print to stdout when no output file is requested.
-	if cfg.OutputFile == "" {
-		return printEnv(cfg, env)
-	}
-
-	// Write to file via exporter.
-	e := exporter.New()
-	format := exporter.Format(strings.ToLower(cfg.OutputFormat))
-	return e.WriteToFile(env, format, cfg.OutputFile)
+	s := sorter.New(sorter.WithOrder(ord))
+	printEnv(env, *format, s)
+	return 0
 }
 
-// runLint performs lint checks on the resolved layers and prints findings.
-func runLint(cfg Config, m *merger.Merger) error {
-	layers, err := m.LayersForContext(cfg.Context)
-	if err != nil {
-		return fmt.Errorf("layers: %w", err)
+func runLint(args []string) int {
+	fs := flag.NewFlagSet("lint", flag.ContinueOnError)
+	path := fs.String("file", ".env", "path to .env file")
+	if err := fs.Parse(args); err != nil {
+		return 1
 	}
-
-	l := linter.New(
-		linter.WithDuplicateCheck(),
-		linter.WithOSShadowCheck(),
-		linter.WithEmptyValueCheck(),
-	)
-
-	findings := l.LintLayers(layers)
+	env, err := loader.LoadFile(*path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load error: %v\n", err)
+		return 1
+	}
+	l := linter.New(linter.WithEmptyValueCheck(), linter.WithOSShadowCheck())
+	findings := l.Lint(env)
 	if len(findings) == 0 {
-		fmt.Fprintln(os.Stdout, "No lint findings.")
-		return nil
+		fmt.Println("no issues found")
+		return 0
 	}
-
 	for _, f := range findings {
-		fmt.Fprintln(os.Stdout, f)
+		fmt.Println(f)
 	}
-	return nil
+	return 1
 }
 
-// printEnv renders the resolved environment map to stdout.
-func printEnv(cfg Config, env map[string]string) error {
-	var opts []printer.Option
-	if cfg.MaskSensitive {
-		m := masker.New()
-		opts = append(opts, printer.WithMasker(m))
+func runPrint(args []string) int {
+	fs := flag.NewFlagSet("print", flag.ContinueOnError)
+	path := fs.String("file", ".env", "path to .env file")
+	format := fs.String("format", "kv", "output format: kv, export, json")
+	sortBy := fs.String("sort-by", "key", "sort by: key, value")
+	if err := fs.Parse(args); err != nil {
+		return 1
 	}
+	env, err := loader.LoadFile(*path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load error: %v\n", err)
+		return 1
+	}
+	opts := []sorter.Option{sorter.WithCaseInsensitive()}
+	if *sortBy == "value" {
+		opts = append(opts, sorter.WithSortByValue())
+	}
+	s := sorter.New(opts...)
+	printEnv(env, *format, s)
+	return 0
+}
 
-	p := printer.New(opts...)
-
-	format := printer.KVFormat
-	switch strings.ToLower(cfg.OutputFormat) {
-	case "table":
-		format = printer.TableFormat
+func printEnv(env map[string]string, format string, s *sorter.Sorter) {
+	pairs := s.Sorted(env)
+	switch strings.ToLower(format) {
+	case "export":
+		for _, p := range pairs {
+			fmt.Printf("export %s=%s\n", p[0], p[1])
+		}
 	case "json":
-		format = printer.JSONFormat
+		ordered := make(map[string]string, len(pairs))
+		for _, p := range pairs {
+			ordered[p[0]] = p[1]
+		}
+		b, _ := json.MarshalIndent(ordered, "", "  ")
+		fmt.Println(string(b))
+	default:
+		for _, p := range pairs {
+			fmt.Printf("%s=%s\n", p[0], p[1])
+		}
 	}
-
-	return p.Print(os.Stdout, env, format)
 }
