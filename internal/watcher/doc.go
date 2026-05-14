@@ -20,4 +20,10 @@
 //
 // The ChangeFunc is invoked in its own goroutine so callers should
 // synchronise any shared state accessed inside it.
+//
+// # File Removal
+//
+// If a watched file is removed from disk, the watcher will not emit a
+// change event for it. The path remains registered so that if the file
+// is recreated later it will be detected on the next polling tick.
 package watcher
