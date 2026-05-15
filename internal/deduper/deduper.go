@@ -79,3 +79,21 @@ func Duplicates(layers ...map[string]string) []string {
 	}
 	return dups
 }
+
+// DuplicateCount returns a map of keys to the number of layers they appear in,
+// including only keys that appear in more than one layer.
+func DuplicateCount(layers ...map[string]string) map[string]int {
+	seen := make(map[string]int)
+	for _, layer := range layers {
+		for k := range layer {
+			seen[k]++
+		}
+	}
+	counts := make(map[string]int)
+	for k, count := range seen {
+		if count > 1 {
+			counts[k] = count
+		}
+	}
+	return counts
+}
